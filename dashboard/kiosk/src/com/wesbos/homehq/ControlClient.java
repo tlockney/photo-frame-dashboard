@@ -49,6 +49,7 @@ public final class ControlClient implements Runnable {
             .openConnection();
         conn = c;
         c.setRequestProperty("Accept", "text/event-stream");
+        c.setRequestProperty("Accept-Encoding", "identity"); // no transfer compression on the stream
         c.setRequestProperty("X-Client-Key", key);
         c.setConnectTimeout(10000);
         c.setReadTimeout(60000); // server sends a keep-alive every 25 s

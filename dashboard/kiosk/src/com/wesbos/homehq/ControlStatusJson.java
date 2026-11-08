@@ -14,6 +14,23 @@ public final class ControlStatusJson {
     return b.append('"').toString();
   }
 
+  /** Drops the client key from a reported URL's query string; anything unparseable is returned as is. */
+  public static String redactKey(String url) {
+    if (url == null) return null;
+    int q = url.indexOf('?');
+    if (q < 0) return url;
+    int h = url.indexOf('#', q);
+    String query = h < 0 ? url.substring(q + 1) : url.substring(q + 1, h);
+    String frag = h < 0 ? "" : url.substring(h);
+    StringBuilder kept = new StringBuilder();
+    for (String part : query.split("&")) {
+      if (part.isEmpty() || part.equals("key") || part.startsWith("key=")) continue;
+      if (kept.length() > 0) kept.append('&');
+      kept.append(part);
+    }
+    return url.substring(0, q) + (kept.length() > 0 ? "?" + kept : "") + frag;
+  }
+
   public static String build(boolean screen, int brightness, String url, long uptime,
       Integer rssi, String appVersion, boolean canReboot) {
     return "{\"screen\":" + screen

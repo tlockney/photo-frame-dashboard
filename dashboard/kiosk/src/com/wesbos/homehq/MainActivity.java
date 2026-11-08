@@ -1055,7 +1055,11 @@ public class MainActivity extends Activity {
     if (web.canGoBack()) web.goBack();
   }
 
-  /** Saves client_id, client_key and control_url extras. Returns true if any were given. */
+  /**
+   * Saves client_id, client_key and control_url extras. Returns true if any were given.
+   * Note: MainActivity is exported, so any app on the device can send these extras and
+   * reconfigure the control channel; frames are expected to be locked down.
+   */
   private boolean applyControlConfig(Intent intent) {
     if (intent == null) return false;
     String id = intent.getStringExtra(PREF_CLIENT_ID);
@@ -1151,6 +1155,8 @@ public class MainActivity extends Activity {
       lp.screenBrightness = 0f;
     } else if (brightnessPct >= 0) {
       lp.screenBrightness = brightnessPct / 100f;
+    } else {
+      lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
     }
     getWindow().setAttributes(lp);
     blackout.setVisibility(screenOn ? View.GONE : View.VISIBLE);
@@ -1173,18 +1179,23 @@ public class MainActivity extends Activity {
       // keep empty
     }
     String url = web.getUrl();
+    if (statusExecutor.isShutdown()) return; // late post after onDestroy
     final String json = ControlStatusJson.build(screenOn, brightnessPct < 0 ? 100 : brightnessPct,
-        url == null ? "" : url, SystemClock.elapsedRealtime() / 1000, rssi, version, canReboot);
-    statusExecutor.execute(new Runnable() {
-      @Override
-      public void run() {
-        try {
-          ControlClient.postStatus(base, id, key, json);
-        } catch (java.io.IOException e) {
-          Log.w(TAG, "homeboard status post failed: " + e.getMessage());
+        url == null ? "" : ControlStatusJson.redactKey(url), SystemClock.elapsedRealtime() / 1000, rssi, version, canReboot);
+    try {
+      statusExecutor.execute(new Runnable() {
+        @Override
+        public void run() {
+          try {
+            ControlClient.postStatus(base, id, key, json);
+          } catch (java.io.IOException e) {
+            Log.w(TAG, "homeboard status post failed: " + e.getMessage());
+          }
         }
-      }
-    });
+      });
+    } catch (java.util.concurrent.RejectedExecutionException e) {
+      // shut down between the check and here
+    }
   }
 
   private void restartKiosk() {

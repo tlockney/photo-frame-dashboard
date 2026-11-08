@@ -49,6 +49,17 @@ public class ControlLogicTest {
     check(json.equals("{\"screen\":true,\"brightness\":55,\"url\":\"http://x/\\\"q\\\"\",\"uptime\":12,"
         + "\"rssi\":null,\"appVersion\":\"1.3\",\"capabilities\":[\"reboot\"]}"), "status json");
 
+    check("http://h:8080/?client=a".equals(com.wesbos.homehq.ControlStatusJson.redactKey("http://h:8080/?client=a&key=s3")),
+        "redact: key last removed");
+    check("http://h:8080/?client=a&x=1".equals(com.wesbos.homehq.ControlStatusJson.redactKey("http://h:8080/?key=s3&client=a&x=1")),
+        "redact: key first removed, others kept");
+    check("http://h:8080/#f".equals(com.wesbos.homehq.ControlStatusJson.redactKey("http://h:8080/?key=s3#f")),
+        "redact: only param, fragment kept");
+    check("http://h:8080/?monkey=1".equals(com.wesbos.homehq.ControlStatusJson.redactKey("http://h:8080/?monkey=1")),
+        "redact: similar name kept");
+    check("http://h:8080/a".equals(com.wesbos.homehq.ControlStatusJson.redactKey("http://h:8080/a")), "redact: no query unchanged");
+    check("not a url".equals(com.wesbos.homehq.ControlStatusJson.redactKey("not a url")), "redact: malformed unchanged");
+
     // ControlClient against a local SSE server.
     HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
     final String[] seenKey = new String[1];
