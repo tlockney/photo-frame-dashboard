@@ -1,13 +1,16 @@
 package com.wesbos.homehq;
 
 import android.app.Activity;
+import android.app.AlarmManager;
 import android.app.AlertDialog;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
@@ -17,6 +20,8 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.Uri;
 import android.net.http.SslError;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -39,13 +44,17 @@ import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Full-screen kiosk WebView for the Home HQ wall tablet.
@@ -77,6 +86,9 @@ public class MainActivity extends Activity {
   static final String PREF_URL = "url";
   static final String PREF_MENU_BUTTON = "menu_button";
   static final String PREF_BOOTANIM_EXIT = "bootanim_exit";
+  static final String PREF_CLIENT_ID = "client_id";
+  static final String PREF_CLIENT_KEY = "client_key";
+  static final String PREF_CONTROL_URL = "control_url";
   static final long EXIT_HOLD_MS = 1500;
   static final int CANCEL_POINTER_IDS = 10; // touch ids 0-9
   static final long RETRY_MS = 5000;
@@ -97,6 +109,19 @@ public class MainActivity extends Activity {
   static final long TIME_NUDGE_MS = 60 * 1000;
 
   private WebView web;
+  private ControlClient control;
+  private View blackout;
+  private boolean screenOn = true;
+  private int brightnessPct = -1; // -1 = never set; leave the system level alone
+  private volatile boolean canReboot;
+  private final ExecutorService statusExecutor = Executors.newSingleThreadExecutor();
+  private final Runnable statusTick = new Runnable() {
+    @Override
+    public void run() {
+      sendStatus();
+      handler.postDelayed(this, 60_000);
+    }
+  };
   private Button menuButton;
   private Thread bootanimThread;
   private final Handler handler = new Handler(Looper.getMainLooper());
@@ -324,6 +349,14 @@ public class MainActivity extends Activity {
     root.addView(menuButton, menuPosition);
     applyMenuButtonFlag(getIntent());
     setContentView(root);
+    blackout = new View(this);
+    blackout.setBackgroundColor(Color.BLACK);
+    blackout.setClickable(true); // swallow taps while the screen is "off"
+    blackout.setVisibility(View.GONE);
+    root.addView(blackout, new FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+    applyControlConfig(getIntent());
+    startControl();
 
     String url = urlFrom(getIntent());
     load(url != null ? url : savedUrl());
@@ -374,6 +407,10 @@ public class MainActivity extends Activity {
     applyBootFlag(intent);
     applyMenuButtonFlag(intent);
     applyBootanimFlag(intent);
+    if (applyControlConfig(intent)) {
+      stopControl();
+      startControl();
+    }
     String url = urlFrom(intent);
     if (url != null) {
       closePortal();
@@ -808,6 +845,8 @@ public class MainActivity extends Activity {
   protected void onDestroy() {
     unregisterReceiver(networkChange);
     handler.removeCallbacksAndMessages(null);
+    stopControl();
+    statusExecutor.shutdown();
     if (web != null) web.destroy();
     super.onDestroy();
   }
@@ -1014,5 +1053,172 @@ public class MainActivity extends Activity {
   @Override
   public void onBackPressed() {
     if (web.canGoBack()) web.goBack();
+  }
+
+  /** Saves client_id, client_key and control_url extras. Returns true if any were given. */
+  private boolean applyControlConfig(Intent intent) {
+    if (intent == null) return false;
+    String id = intent.getStringExtra(PREF_CLIENT_ID);
+    String key = intent.getStringExtra(PREF_CLIENT_KEY);
+    String url = intent.getStringExtra(PREF_CONTROL_URL);
+    if (id == null && key == null && url == null) return false;
+    if (url != null && !isWebUrl(url)) return false;
+    SharedPreferences.Editor e = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+    if (id != null) e.putString(PREF_CLIENT_ID, id);
+    if (key != null) e.putString(PREF_CLIENT_KEY, key);
+    if (url != null) e.putString(PREF_CONTROL_URL, url);
+    e.apply();
+    Log.i(TAG, "Saved homeboard control config for client " + (id != null ? id : "(unchanged)"));
+    return true;
+  }
+
+  private void startControl() {
+    SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+    final String id = p.getString(PREF_CLIENT_ID, null);
+    final String key = p.getString(PREF_CLIENT_KEY, null);
+    final String base = p.getString(PREF_CONTROL_URL, null);
+    if (id == null || key == null || base == null) return;
+    control = new ControlClient(base, id, key, new ControlClient.Listener() {
+      @Override
+      public void onCommand(final ControlCommand c) {
+        handler.post(new Runnable() {
+          @Override
+          public void run() {
+            handleControl(c);
+          }
+        });
+      }
+
+      @Override
+      public void onConnected(boolean up) {
+        if (up) handler.post(new Runnable() {
+          @Override
+          public void run() {
+            sendStatus();
+          }
+        });
+      }
+    });
+    control.start();
+    new Thread(new Runnable() {
+      @Override
+      public void run() {
+        canReboot = checkRoot();
+      }
+    }, "homeboard-root-check").start();
+    handler.removeCallbacks(statusTick);
+    handler.postDelayed(statusTick, 60_000);
+  }
+
+  private void stopControl() {
+    handler.removeCallbacks(statusTick);
+    if (control != null) control.stop();
+    control = null;
+  }
+
+  private void handleControl(ControlCommand c) {
+    switch (c.type) {
+      case "brightness":
+        brightnessPct = c.value;
+        applyScreen();
+        break;
+      case "screen":
+        screenOn = c.on;
+        applyScreen();
+        break;
+      case "reload":
+        web.reload();
+        break;
+      case "url":
+        load(c.url != null ? c.url : savedUrl());
+        break;
+      case "restart-kiosk":
+        restartKiosk();
+        return;
+      case "reboot":
+        if (canReboot) runRoot("reboot");
+        return;
+      default:
+        break; // ping: just report
+    }
+    sendStatus();
+  }
+
+  /** Window-level brightness override: no WRITE_SETTINGS grant needed while the kiosk is in front. */
+  private void applyScreen() {
+    WindowManager.LayoutParams lp = getWindow().getAttributes();
+    if (!screenOn) {
+      lp.screenBrightness = 0f;
+    } else if (brightnessPct >= 0) {
+      lp.screenBrightness = brightnessPct / 100f;
+    }
+    getWindow().setAttributes(lp);
+    blackout.setVisibility(screenOn ? View.GONE : View.VISIBLE);
+  }
+
+  private void sendStatus() {
+    SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+    final String id = p.getString(PREF_CLIENT_ID, null);
+    final String key = p.getString(PREF_CLIENT_KEY, null);
+    final String base = p.getString(PREF_CONTROL_URL, null);
+    if (id == null || key == null || base == null) return;
+    Integer rssi = null;
+    WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+    WifiInfo info = wm == null ? null : wm.getConnectionInfo();
+    if (info != null && info.getNetworkId() != -1) rssi = info.getRssi();
+    String version = "";
+    try {
+      version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+    } catch (PackageManager.NameNotFoundException e) {
+      // keep empty
+    }
+    String url = web.getUrl();
+    final String json = ControlStatusJson.build(screenOn, brightnessPct < 0 ? 100 : brightnessPct,
+        url == null ? "" : url, SystemClock.elapsedRealtime() / 1000, rssi, version, canReboot);
+    statusExecutor.execute(new Runnable() {
+      @Override
+      public void run() {
+        try {
+          ControlClient.postStatus(base, id, key, json);
+        } catch (java.io.IOException e) {
+          Log.w(TAG, "homeboard status post failed: " + e.getMessage());
+        }
+      }
+    });
+  }
+
+  private void restartKiosk() {
+    AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
+    PendingIntent pi = PendingIntent.getActivity(this, 1,
+        new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_CANCEL_CURRENT);
+    am.set(AlarmManager.RTC, System.currentTimeMillis() + 1500, pi);
+    finishAffinity();
+    System.exit(0);
+  }
+
+  private static boolean checkRoot() {
+    try {
+      Process p = Runtime.getRuntime().exec(new String[] {"su", "0", "id"});
+      BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+      String line = r.readLine();
+      p.waitFor();
+      return line != null && line.contains("uid=0");
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  private static void runRoot(final String cmd) {
+    new Thread(new Runnable() {
+      @Override
+      public void run() {
+        try {
+          Runtime.getRuntime().exec(new String[] {"su", "0", cmd}).waitFor();
+        } catch (Exception e) {
+          Log.w(TAG, "root command failed: " + cmd);
+        }
+      }
+    }, "homeboard-root").start();
   }
 }
