@@ -140,7 +140,7 @@ public class MainActivity extends Activity {
   private boolean resumed;
   private LinearLayout offline;
   private TextView offlineTitle, offlineText;
-  private Button signIn;
+  private Button signIn, wifiButton;
   // Captive portal: found by the last probe, on screen, closed by the owner, or its page failed.
   private boolean probing, portalFound, portalMode, portalDismissed, portalFailed;
   private long portalSince;
@@ -537,12 +537,12 @@ public class MainActivity extends Activity {
     offlineText.setPadding(dp(24), dp(12), dp(24), dp(28));
     offline.addView(offlineText);
 
-    Button wifi = new Button(this);
-    wifi.setText("Open Wi-Fi settings");
-    wifi.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
-    wifi.setPadding(dp(32), dp(16), dp(32), dp(16));
-    wifi.setOnClickListener(v -> openWifiSettings());
-    offline.addView(wifi, new LinearLayout.LayoutParams(
+    wifiButton = new Button(this);
+    wifiButton.setText("Open Wi-Fi settings");
+    wifiButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+    wifiButton.setPadding(dp(32), dp(16), dp(32), dp(16));
+    wifiButton.setOnClickListener(v -> openWifiSettings());
+    offline.addView(wifiButton, new LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
     signIn = new Button(this);
@@ -730,8 +730,16 @@ public class MainActivity extends Activity {
       portalFound = false;
       portalDismissed = false;
     }
-    signIn.setVisibility(wifi && portalFound ? View.VISIBLE : View.GONE);
-    if (wifi && portalFound) {
+    // Just after boot, Wi-Fi is usually still joining (or just joined): keep the screen dark and
+    // wordless. Retries every few seconds call this again, so the real reason shows once the grace
+    // is over if the dashboard still hasn't loaded.
+    boolean quiet = BootGrace.quietOffline(SystemClock.elapsedRealtime());
+    signIn.setVisibility(!quiet && wifi && portalFound ? View.VISIBLE : View.GONE);
+    wifiButton.setVisibility(quiet ? View.GONE : View.VISIBLE);
+    if (quiet) {
+      offlineTitle.setText("");
+      offlineText.setText("");
+    } else if (wifi && portalFound) {
       offlineTitle.setText("Sign in to Wi-Fi");
       offlineText.setText("This Wi-Fi shows a page where you accept its terms before the frame can go online.");
     } else if (wifi) {

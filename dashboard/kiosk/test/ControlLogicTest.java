@@ -96,6 +96,13 @@ public class ControlLogicTest {
     check(com.wesbos.homehq.ControlBacklight.nudge(0.6f) != 0.6f && com.wesbos.homehq.ControlBacklight.nudge(1f) < 1f, "nudge high differs");
     check(com.wesbos.homehq.ControlBacklight.nudge(-1f) >= 0f, "nudge from no-override is a real level");
 
+    long grace = com.wesbos.homehq.BootGrace.WIFI_JOIN_MS;
+    check(com.wesbos.homehq.BootGrace.quietOffline(30_000), "30 s after boot: offline screen blank (Wi-Fi still joining or just joined)");
+    check(com.wesbos.homehq.BootGrace.quietOffline(0), "at boot: blank");
+    check(!com.wesbos.homehq.BootGrace.quietOffline(grace), "once the grace is over: the real message");
+    check(!com.wesbos.homehq.BootGrace.quietOffline(3_600_000), "an hour after boot: the real message");
+    check(grace >= 30_000 && grace <= 120_000, "grace is between 30 s and 2 min");
+
     if (failures > 0) {
       System.out.println(failures + " failed");
       System.exit(1);
