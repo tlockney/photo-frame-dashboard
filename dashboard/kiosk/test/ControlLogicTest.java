@@ -90,6 +90,12 @@ public class ControlLogicTest {
     client.stop();
     server.stop(0);
 
+    check(com.wesbos.homehq.ControlBacklight.OFF_SCRIPT.contains("/sys/class/backlight/*/brightness")
+        && com.wesbos.homehq.ControlBacklight.OFF_SCRIPT.contains("echo 0"), "backlight off script zeroes all devices");
+    check(com.wesbos.homehq.ControlBacklight.nudge(0.15f) != 0.15f && com.wesbos.homehq.ControlBacklight.nudge(0.15f) >= 0f, "nudge low differs");
+    check(com.wesbos.homehq.ControlBacklight.nudge(0.6f) != 0.6f && com.wesbos.homehq.ControlBacklight.nudge(1f) < 1f, "nudge high differs");
+    check(com.wesbos.homehq.ControlBacklight.nudge(-1f) >= 0f, "nudge from no-override is a real level");
+
     if (failures > 0) {
       System.out.println(failures + " failed");
       System.exit(1);

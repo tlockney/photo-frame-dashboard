@@ -111,9 +111,10 @@ public class MainActivity extends Activity {
   private WebView web;
   private ControlClient control;
   private View blackout;
-  private boolean screenOn = true;
+  private volatile boolean screenOn = true;
   private int brightnessPct = -1; // -1 = never set; leave the system level alone
   private volatile boolean canReboot;
+  private boolean backlightCut; // sysfs backlight was zeroed by screen off; must be re-applied on
   private final ExecutorService statusExecutor = Executors.newSingleThreadExecutor();
   private final Runnable statusTick = new Runnable() {
     @Override
@@ -1158,8 +1159,29 @@ public class MainActivity extends Activity {
     } else {
       lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
     }
-    getWindow().setAttributes(lp);
+    if (screenOn && backlightCut) {
+      // Android believes the level is unchanged, so show a different one first, then the real target.
+      backlightCut = false;
+      final float target = lp.screenBrightness;
+      lp.screenBrightness = ControlBacklight.nudge(target);
+      getWindow().setAttributes(lp);
+      handler.postDelayed(new Runnable() {
+        @Override
+        public void run() {
+          if (!screenOn) return;
+          WindowManager.LayoutParams l = getWindow().getAttributes();
+          l.screenBrightness = target;
+          getWindow().setAttributes(l);
+        }
+      }, 150);
+    } else {
+      getWindow().setAttributes(lp);
+    }
     blackout.setVisibility(screenOn ? View.GONE : View.VISIBLE);
+    if (!screenOn && canReboot) {
+      backlightCut = true;
+      runRootShell(ControlBacklight.OFF_SCRIPT);
+    }
   }
 
   private void sendStatus() {
@@ -1218,6 +1240,22 @@ public class MainActivity extends Activity {
     } catch (Exception e) {
       return false;
     }
+  }
+
+  private void runRootShell(final String script) {
+    new Thread(new Runnable() {
+      @Override
+      public void run() {
+        try {
+          Thread.sleep(1500); // let Android's brightness ramp down finish, or it rewrites its minimum over ours
+          if (screenOn) return; // turned back on in the meantime
+          // su joins its arguments into one command line, so pass the quoted script as a single string
+          Runtime.getRuntime().exec(new String[] {"su", "0", "sh -c '" + script + "'"}).waitFor();
+        } catch (Exception e) {
+          Log.w(TAG, "root shell failed");
+        }
+      }
+    }, "homeboard-root").start();
   }
 
   private static void runRoot(final String cmd) {
